@@ -69,7 +69,12 @@ public class LogglyMessageQueue {
 			return false;
 		}
 
-		return db.deleteEntry(lastRead);
+		if(db.deleteEntry(lastRead)){
+			lastRead = null;
+			return true;
+		}
+		
+		return false;
 	}
 
 }
