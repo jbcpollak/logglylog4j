@@ -29,8 +29,6 @@ public class LogglyAppender extends AppenderSkeleton {
 
 	private String dirName;
 
-	private String logName;
-
 	private String logglyUrl;
 
 	public LogglyAppender() {
@@ -74,15 +72,11 @@ public class LogglyAppender extends AppenderSkeleton {
 			LogLog.warn("directory for log queue was not set.  Please set the \"dirName\" property");
 		}
 
-		if (logName == null) {
-			LogLog.warn("log name for log queue was not set.  Please set the \"logName\" property");
-		}
-
 		if (logglyUrl == null) {
 			LogLog.warn("loggy url for log queue was not set.  Please set the \"logglyUrl\" property");
 		}
 
-		messageQ = new LogglyMessageQueue(dirName, logName, errorHandler);
+		messageQ = new LogglyMessageQueue(dirName, getName(), errorHandler);
 		Thread posterThread = new Thread(poster);
 		posterThread.setDaemon(true);
 		posterThread.start();
@@ -179,14 +173,6 @@ public class LogglyAppender extends AppenderSkeleton {
 	 */
 	public void setDirName(String dirName) {
 		this.dirName = dirName;
-	}
-
-	/**
-	 * @param logName
-	 *            the logName to set
-	 */
-	public void setLogName(String logName) {
-		this.logName = logName;
 	}
 
 	/**
