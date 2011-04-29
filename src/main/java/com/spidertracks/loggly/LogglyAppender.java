@@ -6,6 +6,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.net.URL;
 import java.net.URLConnection;
+import java.util.List;
 
 import org.apache.log4j.AppenderSkeleton;
 import org.apache.log4j.helpers.LogLog;
@@ -30,6 +31,8 @@ public class LogglyAppender extends AppenderSkeleton {
 	private String dirName;
 
 	private String logglyUrl;
+	
+	private int batchSize = 50;
 
 	public LogglyAppender() {
 		super();
@@ -90,9 +93,9 @@ public class LogglyAppender extends AppenderSkeleton {
 		public void run() {
 
 			while (running) {
-				String message = messageQ.peek();
+				List<Entry> messages = messageQ.next(batchSize);
 
-				if (message == null) {
+				if (messages == null || messages.size() == 0) {
 					// nothing to consume,sleep for 1 second
 					try {
 						Thread.sleep(1000);
@@ -108,8 +111,8 @@ public class LogglyAppender extends AppenderSkeleton {
 
 				try {
 					//attempt to send and consume the data
-					if (sendData(message)) {
-						messageQ.consume();
+					if (sendData(messages)) {
+						messageQ.consume(messages);
 					}
 				} catch (IOException e) {
 					errorHandler.error(String.format(
@@ -128,7 +131,7 @@ public class LogglyAppender extends AppenderSkeleton {
 		 * @param message
 		 * @throws IOException
 		 */
-		private boolean sendData(String message) throws IOException {
+		private boolean sendData(List<Entry> messages) throws IOException {
 			URL url = new URL(logglyUrl);
 			URLConnection conn = url.openConnection();
 			conn.setDoOutput(true);
@@ -138,7 +141,11 @@ public class LogglyAppender extends AppenderSkeleton {
 					"application/x-www-form-urlencoded");
 			OutputStreamWriter wr = new OutputStreamWriter(
 					conn.getOutputStream());
-			wr.write(message);
+			
+			for(Entry message: messages){
+				wr.write(message.getMessage());
+			}
+			
 			wr.flush();
 			wr.close();
 
@@ -181,6 +188,14 @@ public class LogglyAppender extends AppenderSkeleton {
 	 */
 	public void setLogglyUrl(String logglyUrl) {
 		this.logglyUrl = logglyUrl;
+	}
+
+	/**
+	 * Set the maximum batch size for uploads.  Defaults to 50.
+	 * @param batchSize
+	 */
+	public void setBatchSize(int batchSize) {
+		this.batchSize = batchSize;
 	}
 
 }

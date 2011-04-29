@@ -1,5 +1,7 @@
 package com.spidertracks.loggly;
 
+import java.util.List;
+
 import org.apache.log4j.spi.ErrorHandler;
 
 /**
@@ -13,7 +15,6 @@ import org.apache.log4j.spi.ErrorHandler;
 public class LogglyMessageQueue {
 
 	private EmbeddedDb db;
-	private Entry lastRead;
 
 	/**
 	 * The file name of the queue
@@ -43,20 +44,9 @@ public class LogglyMessageQueue {
 	 * 
 	 * @return
 	 */
-	public String peek() {
-		// we never consumed the last message, return it again
-		if (lastRead != null) {
-			return (String) lastRead.getMessage();
-		}
-
-		lastRead = db.getNext();
-
-		// nothing to consume, return null
-		if (lastRead == null) {
-			return null;
-		}
-
-		return lastRead.getMessage();
+	public List<Entry> next(int size) {
+		return db.getNext(size);
+		
 	}
 
 	/**
@@ -64,12 +54,12 @@ public class LogglyMessageQueue {
 	 * 
 	 * @return
 	 */
-	public boolean consume() {
-		if (lastRead == null) {
-			return false;
-		}
-
-		return db.deleteEntry(lastRead);
+	public boolean consume(List<Entry> entries) {
+		
+		int count =  db.deleteEntries(entries);
+		
+		return count == entries.size();
+		
 	}
 
 }

@@ -9,6 +9,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.apache.log4j.spi.ErrorHandler;
 
@@ -20,11 +22,14 @@ import org.apache.log4j.spi.ErrorHandler;
  */
 public class EmbeddedDb {
 
+	
 	private Connection conn;
 	private ErrorHandler errorHandler;
 	private String insertStatement = null;
 	private String selectStatement = null;
 	private String deleteStatement = null;
+	
+	
 
 	/**
 	 * The embedded db
@@ -71,31 +76,34 @@ public class EmbeddedDb {
 	 * 
 	 * @return
 	 */
-	public Entry getNext() {
+	public List<Entry> getNext(int size) {
+		List<Entry> entries = new ArrayList<Entry>();
+
 		try {
 			PreparedStatement ps = conn.prepareStatement(selectStatement);
+			ps.setInt(1, size);
 
 			ResultSet rs = ps.executeQuery();
 
-			if (!rs.next()) {
-				return null;
+			while (rs.next()) {
+
+				Entry entry = new Entry();
+
+				entry.setId(rs.getLong(1));
+
+				entry.setMessage(rs.getString(2));
+				entry.setTime(rs.getLong(3));
+				
+				entries.add(entry);
+
 			}
-
-			Entry entry = new Entry();
-
-			entry.setId(rs.getLong(1));
-
-			entry.setMessage(rs.getString(2));
-			entry.setTime(rs.getLong(3));
 			ps.close();
-
-			return entry;
 
 		} catch (SQLException e) {
 			errorHandler.error("Unable to query the embedded db", e, 2);
 		}
 
-		return null;
+		return entries;
 	}
 
 	/**
@@ -104,19 +112,32 @@ public class EmbeddedDb {
 	 * @param e
 	 * @return
 	 */
-	public boolean deleteEntry(Entry entry) {
+	public int deleteEntries(List<Entry> entries) {
+		
+		StringBuffer buffer = new StringBuffer();
+		buffer.append(deleteStatement);
+		
+		
+		for(Entry entry:entries){
+			buffer.append(entry.getId()).append(",");
+		}
+		
+		buffer.setLength(buffer.length()-1);
+		buffer.append(")");
+		
+		
 		try {
-			PreparedStatement ps = conn.prepareStatement(deleteStatement);
-			ps.setLong(1, entry.getId());
+			
+			PreparedStatement ps = conn.prepareStatement(buffer.toString());
 			int count = ps.executeUpdate();
 			ps.close();
 
-			return count > 0;
+			return count;
 		} catch (SQLException e) {
 			errorHandler.error("Unable to persist log message", e, 1);
 		}
 
-		return false;
+		return 0;
 	}
 
 	/**
@@ -132,11 +153,11 @@ public class EmbeddedDb {
 
 		insertStatement = "INSERT INTO " + logName
 				+ " (time, message) VALUES(?, ?)";
-		
-		selectStatement = "SELECT TOP 1 id, message, time FROM " + logName
+
+		selectStatement = "SELECT TOP ? id, message, time FROM " + logName
 				+ " ORDER BY id";
-		
-		deleteStatement = "DELETE FROM " + logName + " WHERE id = ?";
+
+		deleteStatement = "DELETE FROM " + logName + " WHERE id in (";
 
 		// The table may allready exsists if the queue is persistent.
 		if (tableExists(logName)) {
