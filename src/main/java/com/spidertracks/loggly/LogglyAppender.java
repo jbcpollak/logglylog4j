@@ -26,13 +26,17 @@ public class LogglyAppender extends AppenderSkeleton {
 
 	private final HttpPost poster = new HttpPost();
 
-	private LogglyMessageQueue messageQ;
+	private EmbeddedDb db;
+	
+//	private LogglyMessageQueue messageQ;
 
 	private String dirName;
 
 	private String logglyUrl;
 	
 	private int batchSize = 50;
+	
+	
 
 	public LogglyAppender() {
 		super();
@@ -61,7 +65,7 @@ public class LogglyAppender extends AppenderSkeleton {
 
 		String output = this.layout.format(event);
 
-		messageQ.push(output);
+		db.writeEntry(output, System.nanoTime());
 	}
 
 	/**
@@ -79,7 +83,9 @@ public class LogglyAppender extends AppenderSkeleton {
 			LogLog.warn("loggy url for log queue was not set.  Please set the \"logglyUrl\" property");
 		}
 
-		messageQ = new LogglyMessageQueue(dirName, getName(), errorHandler);
+		db = new EmbeddedDb(dirName, getName(), errorHandler);
+		
+//		messageQ = new LogglyMessageQueue(dirName, getName(), errorHandler);
 		Thread posterThread = new Thread(poster);
 		posterThread.setDaemon(true);
 		posterThread.start();
@@ -93,7 +99,7 @@ public class LogglyAppender extends AppenderSkeleton {
 		public void run() {
 
 			while (running) {
-				List<Entry> messages = messageQ.next(batchSize);
+				List<Entry> messages = db.getNext(batchSize);
 
 				if (messages == null || messages.size() == 0) {
 					// nothing to consume,sleep for 1 second
@@ -112,7 +118,7 @@ public class LogglyAppender extends AppenderSkeleton {
 				try {
 					//attempt to send and consume the data
 					if (sendData(messages)) {
-						messageQ.consume(messages);
+						db.deleteEntries(messages);
 					}
 				} catch (IOException e) {
 					errorHandler.error(String.format(
