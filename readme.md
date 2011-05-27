@@ -16,6 +16,18 @@ Usage is relatively straight forward.
       </layout>
     </appender>
 
+or 
+
+    log4j.appender.loggly=com.spidertracks.loggly.LogglyAppender
+    log4j.appender.loggly.dirName=logs/
+    log4j.appender.loggly.logglyUrl=https://logs.loggly.com/inputs/xxxxx-xxxx
+    log4j.appender.loggly.proxyHost=example.com
+    log4j.appender.loggly.proxyPort=8080
+    log4j.appender.loggly.batchSize=50
+    log4j.appender.loggly.layout=org.apache.log4j.EnchancedPatternLayout
+    log4j.appender.loggly.layout.ConversionPattern=%d{ISO8601}{GMT}Z %5p [%t]  %m%n
+
+
 
 # Architecture.
 
