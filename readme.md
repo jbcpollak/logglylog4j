@@ -1,3 +1,6 @@
+# Important 
+   The appender will drop messages that results in a 400 Bad Request from the loggly http API. 
+
 # Usage.
 
 Usage is relatively straight forward.
@@ -38,6 +41,7 @@ uploads it to the configured url.
 This supports guaranteed delivery.  If the logger cannot contact Loggly,
      a log4j internal message will be logged, and message will queue locally.
      The sending thread will continue to attempt to connect until it succeeds.  
-
+     Excepts when the request http status codes i 400 Bad Request - then the messages is dumped.
+     ex. a too large message.
 
 

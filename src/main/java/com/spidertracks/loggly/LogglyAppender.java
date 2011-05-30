@@ -110,24 +110,26 @@ public class LogglyAppender extends AppenderSkeleton {
                                 .error("Unable to sleep for 1 second in queue consumer",
                                         e, 1);
                     }
-
                     continue;
                 }
 
                 try {
-                    //attempt to send and consume the data
-                    if (sendData(messages)) {
-                        db.deleteEntries(messages);
+                    int response = sendData(messages);
+                    switch (response) {
+                        case 201: {
+                            db.deleteEntries(messages);
+                        }
+                        case 400: {
+                            LogLog.warn("loggly bad request dumping message");
+                            db.deleteEntries(messages);
+                        }
                     }
                 } catch (IOException e) {
                     errorHandler.error(String.format(
                             "Unable to send data to loggly at URL %s",
                             logglyUrl), e, 2);
-
                 }
-
             }
-
         }
 
         /**
@@ -136,7 +138,8 @@ public class LogglyAppender extends AppenderSkeleton {
          * @param message
          * @throws IOException
          */
-        private boolean sendData(List<Entry> messages) throws IOException {
+
+        private int sendData(List<Entry> messages) throws IOException {
             URL url = new URL(logglyUrl);
             Proxy proxy = Proxy.NO_PROXY;
             if (proxyHost != null) {
@@ -154,31 +157,55 @@ public class LogglyAppender extends AppenderSkeleton {
                     conn.getOutputStream());
 
             for (Entry message : messages) {
-                wr.write(message.getMessage());
+                if (message.getMessage().getBytes().length < 5200)
+                    wr.write(message.getMessage());
+                else
+                    LogLog.warn("message to large for loggly - dropping msg");
             }
 
             wr.flush();
             wr.close();
+            HttpURLConnection huc = ((HttpURLConnection) conn);
+            int respCode = huc.getResponseCode();
+            // graped from http://download.oracle.com/javase/1.5.0/docs/guide/net/http-keepalive.html
+            BufferedReader in = null;
+            StringBuffer response = null;
+            try {
+                in = new BufferedReader(new InputStreamReader(
+                        conn.getInputStream()));
+                response = new StringBuffer();
+                int value = -1;
+                while ((value = in.read()) != -1) {
+                    response.append((char) value);
+                }
+                in.close();
+            } catch (IOException e) {
+                try {
+                    response = new StringBuffer();
+                    response.append("Status: ").append(respCode).append(" body: ");
+                    in = new BufferedReader(new InputStreamReader(huc.getErrorStream()));
+                    int value = -1;
+                    while ((value = in.read()) != -1) {
+                        response.append((char) value);
+                    }
+                    in.close();
+                    errorHandler.error(String.format(
+                            "Unable to send data to loggly at URL %s Response %s",
+                            logglyUrl, response));
+                } catch (IOException ee) {
+                    errorHandler.error(String.format(
+                            "Unable to send data to loggly at URL %s",
+                            logglyUrl), e, 2);
 
-            BufferedReader in = new BufferedReader(new InputStreamReader(
-                    conn.getInputStream()));
-
-            StringBuffer response = new StringBuffer();
-            int value = -1;
-
-            while ((value = in.read()) != -1) {
-                response.append((char) value);
+                }
             }
-
-            in.close();
-
-            return response.indexOf("ok") > -1;
-
+            return respCode;
         }
 
         /**
          * Stop this thread sending data and write the last read position
          */
+
         public void stop() {
             running = false;
         }
@@ -187,6 +214,7 @@ public class LogglyAppender extends AppenderSkeleton {
 
     /**
      * ProxyHost a valid dns name or ip adresse for a proxy.
+     *
      * @param proxyHost
      */
     public void setProxyHost(String proxyHost) {
@@ -195,6 +223,7 @@ public class LogglyAppender extends AppenderSkeleton {
 
     /**
      * The proxy port for a proxy
+     *
      * @param proxyPort
      */
     public void setProxyPort(int proxyPort) {
