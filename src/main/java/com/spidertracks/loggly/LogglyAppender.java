@@ -1,15 +1,12 @@
 package com.spidertracks.loggly;
 
+import java.io.*;
+import java.net.*;
+import java.util.List;
+
 import org.apache.log4j.AppenderSkeleton;
 import org.apache.log4j.helpers.LogLog;
 import org.apache.log4j.spi.LoggingEvent;
-
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
-import java.net.*;
-import java.util.List;
 
 /**
  * Currently uses an asynchronous blocking queue to write messages. Messages are written to files with sequential identifiers, these sequential files are then read by the reader thread. When a file is
@@ -19,7 +16,7 @@ import java.util.List;
  */
 public class LogglyAppender extends AppenderSkeleton {
 
-    private final HttpPost poster = new HttpPost();
+    private HttpPost poster;
 
     private EmbeddedDb db;
 
@@ -48,6 +45,9 @@ public class LogglyAppender extends AppenderSkeleton {
     public void close() {
         // Stop is a blocking call, it waits for HttpPost to finish.
         poster.stop();
+
+        // now shutdown the database
+        db.shutdown();
     }
 
     public boolean requiresLayout() {
@@ -69,6 +69,10 @@ public class LogglyAppender extends AppenderSkeleton {
             db.writeEntry(output, System.nanoTime());
             waitLock.notify();
         }
+        
+        if (poster.getState() == ThreadState.STOPPED) {
+            LogLog.debug("Noticed thread stopped!");
+        }
     }
 
     /**
@@ -85,14 +89,11 @@ public class LogglyAppender extends AppenderSkeleton {
             LogLog.warn("loggly url for log queue was not set.  Please set the \"logglyUrl\" property");
         }
 
-        if (name == null) {
-            // set a reasonable default
-            name = "loggly";
-        }
-
         LogLog.debug("Creating database in " + dirName + " with name " + getName());
         db = new EmbeddedDb(dirName, getName(), errorHandler);
-
+        
+        poster = new HttpPost();
+        
         Thread posterThread = new Thread(poster);
         posterThread.start();
 
@@ -102,29 +103,28 @@ public class LogglyAppender extends AppenderSkeleton {
 
     private class HttpPost implements Runnable {
 
-        
         // State variables needs to be volatile, otherwise it can be cached local to the thread and stop() will never work
         volatile ThreadState curState = ThreadState.START;
-        volatile ThreadState requestedState = ThreadState.STOPPED;
+        volatile ThreadState requestedState = ThreadState.RUNNING;
         
         final Object stopLock = new Object();
 
         public void run() {
 
-            
             curState = ThreadState.RUNNING;
-            
+            LogLog.debug("Loggly: background thread waiting for db");
             boolean initialized = waitUntilDbInitialized();
             if (initialized) {
+                LogLog.debug("Loggly: background thread starting");
                 
-                // ThreadState.LAST_SWEEP lets us have one last pass after shutdown, to see if there is anything left to send.
-                while (curState == ThreadState.RUNNING || curState == ThreadState.STOP_REQUESTED) {
+                List<Entry> messages = db.getNext(batchSize);
+                
+                // ThreadState.STOP_REQUESTED lets us keep running until our queue is empty, but stop when it is
+                while (curState == ThreadState.RUNNING || (curState == ThreadState.STOP_REQUESTED && messages != null && messages.size() > 0)) {
                     
                     if (curState == ThreadState.STOP_REQUESTED) {
-                        LogLog.warn("Loggly doing one last sweep");
+                        LogLog.warn("Loggly: Stop requested, emptying queue of: " + messages.size());
                     }
-                    
-                    List<Entry> messages = db.getNext(batchSize);
                     
                     if (messages == null || messages.size() == 0) {
                         
@@ -155,7 +155,7 @@ public class LogglyAppender extends AppenderSkeleton {
                                 break;
                             }
                             case 400: {
-                                LogLog.warn("loggly bad request dumping message");
+                                LogLog.warn("loggly: bad request dumping message");
                                 db.deleteEntries(messages);
                             }
                             default: {
@@ -176,10 +176,11 @@ public class LogglyAppender extends AppenderSkeleton {
                         curState = ThreadState.STOP_REQUESTED;
                     } 
                     
+                    messages = db.getNext(batchSize);
+                    
                 }
                 
-                db.shutdown();
-                LogLog.warn("Loggly background thread is stopped.");
+                LogLog.debug("Loggly background thread is stopped.");
             } else {
                 LogLog.warn("Loggly bailing out because we were interrupted while waiting to initialize");
                 curState = ThreadState.STOPPED;
@@ -190,16 +191,23 @@ public class LogglyAppender extends AppenderSkeleton {
             }
         }
         
+        /**
+         * @return
+         */
+        public ThreadState getState() {
+            return curState;
+        }
+
         /** Waits until the db is initialized, or stop has been requested.
          * 
          * @return
          */
         public boolean waitUntilDbInitialized() {
-            Object dbInitLock = db.getInitLock();
-            synchronized (dbInitLock) {
-                while (db.isInitialized() && requestedState != ThreadState.STOPPED) {
+            
+            synchronized (db.initializeLock) {
+                while (!db.isInitialized() && requestedState != ThreadState.STOPPED) {
                     try {
-                        dbInitLock.wait();
+                        db.initializeLock.wait();
                     } catch (InterruptedException e) {
                         LogLog.error("Loggly Appender interrupted waiting for db initalization", e);
                     }
@@ -233,17 +241,19 @@ public class LogglyAppender extends AppenderSkeleton {
             conn.setUseCaches(false);
             // conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
             conn.setRequestProperty("Content-Type", "text/plain");
-            OutputStreamWriter wr = new OutputStreamWriter(conn.getOutputStream());
+            OutputStream os = conn.getOutputStream();
 
             for (Entry message : messages) {
-                if (message.getMessage().getBytes().length < 5200)
-                    wr.write(message.getMessage());
-                else
-                    LogLog.warn("message to large for loggly - dropping msg");
+                final byte[] msgBytes = message.getMessage().getBytes();
+                if (msgBytes.length < 5200) {
+                    conn.getOutputStream().write(msgBytes);
+                } else {
+                    LogLog.warn("message to large for loggly - dropping msg:\n" + msgBytes);
+                }
             }
 
-            wr.flush();
-            wr.close();
+            os.flush();
+            os.close();
             HttpURLConnection huc = ((HttpURLConnection) conn);
             int respCode = huc.getResponseCode();
             // grabbed from http://download.oracle.com/javase/1.5.0/docs/guide/net/http-keepalive.html
@@ -282,16 +292,17 @@ public class LogglyAppender extends AppenderSkeleton {
          */
 
         public void stop() {
+            LogLog.debug("Stopping background thread");
             requestedState = ThreadState.STOPPED;
             
             // Poke the thread to shut it down.
             synchronized (waitLock) {
-                LogLog.debug("Waking loggly thread up");
+                LogLog.debug("Loggly: Waking background thread up");
                 waitLock.notify();
             }
             
             synchronized (poster.stopLock) {
-                LogLog.debug("Waiting for loggly thread to stop");
+                LogLog.debug("Loggly: Waiting for background thread to stop");
                 while (poster.curState != ThreadState.STOPPED) {
                     try {
                         poster.stopLock.wait(100);

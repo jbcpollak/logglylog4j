@@ -25,10 +25,12 @@ public class EmbeddedDb {
     private String insertStatement = null;
     private String selectStatement = null;
     private String deleteStatement = null;
-    private Object initializeLock = new Object();
+    public Object initializeLock = new Object();
 
     private final String databasePath;
     private final String hsqlConfigUrl;
+    
+    private boolean shutdownRequested = false;
     private final Server server;
     
     // This needs to be static
@@ -152,10 +154,6 @@ public class EmbeddedDb {
         return conn != null;
     }
 
-    public Object getInitLock() {
-        return initializeLock;
-    }
-    
     private Server startServer() {
         synchronized (serverLock) {
             Server server = new Server();
@@ -173,12 +171,18 @@ public class EmbeddedDb {
     public void shutdown() {
         synchronized (serverLock) {
             try {
-                LogLog.warn("Loggly: shutting down database");
-                PreparedStatement ps = conn.prepareStatement("SHUTDOWN COMPACT");
-                ps.execute();
-                ps.close();
-
-                server.stop();
+                
+                // this is a silly wrapper, but it looks like log4j can cause shutdown()
+                // to be called multiple times. (both directly and through finalize())
+                if (!shutdownRequested) {
+                    LogLog.debug("Loggly: shutting down database");
+                    PreparedStatement ps = conn.prepareStatement("SHUTDOWN COMPACT");
+                    ps.execute();
+                    ps.close();
+    
+                    server.stop();
+                    shutdownRequested = true;
+                }
 
                 while (server.getState() != ServerConstants.SERVER_STATE_SHUTDOWN) {
                     try {
@@ -205,7 +209,7 @@ public class EmbeddedDb {
         }
 
         synchronized (initializeLock) {
-            LogLog.warn("Initializing database");
+            LogLog.debug("Loggly: Initializing database");
             conn = DriverManager.getConnection(hsqlConfigUrl, "sa", "");
             initializeLock.notify();
         }
