@@ -9,6 +9,8 @@ import java.util.List;
 
 import org.apache.log4j.helpers.LogLog;
 import org.apache.log4j.spi.ErrorHandler;
+import org.hsqldb.Server;
+import org.hsqldb.server.ServerConstants;
 
 /**
  * Class that performs all operations on the embedded log database
@@ -25,6 +27,12 @@ public class EmbeddedDb {
     private String deleteStatement = null;
     private Object initializeLock = new Object();
 
+    private final String databasePath;
+    private final String hsqlConfigUrl;
+    private final Server server;
+    
+    // This needs to be static
+    private static final Object serverLock = new Object();
 
     /**
      * The embedded db
@@ -35,22 +43,17 @@ public class EmbeddedDb {
      */
     public EmbeddedDb(String dirName, String logName, ErrorHandler errorHandler) {
 
+        databasePath = "file:" + dirName + "/" + logName + ";hsqldb.applog=1; hsqldb.lock_file=false";
+        hsqlConfigUrl = "jdbc:hsqldb:" + databasePath;
+        
+        server = startServer();
+        
         this.errorHandler = errorHandler;
         try {
             createTableAndIndex(dirName, logName);
         } catch (SQLException e) {
             errorHandler.error("Unable to create local database for log queue",
                     e, 1);
-        }
-    }
-    
-    public void shutdown() {
-        try {
-            PreparedStatement ps = conn.prepareStatement("SHUTDOWN COMPACT");
-            ps.execute();
-            ps.close();
-        } catch (SQLException e) {
-            errorHandler.error("Unable to close HSQL database", e, 1);
         }
     }
 
@@ -153,31 +156,62 @@ public class EmbeddedDb {
         return initializeLock;
     }
     
+    private Server startServer() {
+        synchronized (serverLock) {
+            Server server = new Server();
+            
+            server.setDatabaseName(0, "loggly");
+            server.setDatabasePath(0, databasePath);
+            server.setLogWriter(null);
+            server.setErrWriter(null);
+            server.start();
+            
+            return server;            
+        }
+    }
+
+    public void shutdown() {
+        synchronized (serverLock) {
+            try {
+                LogLog.warn("Loggly: shutting down database");
+                PreparedStatement ps = conn.prepareStatement("SHUTDOWN COMPACT");
+                ps.execute();
+                ps.close();
+
+                server.stop();
+
+                while (server.getState() != ServerConstants.SERVER_STATE_SHUTDOWN) {
+                    try {
+                        Thread.sleep(100);
+                    } catch (InterruptedException e) {
+                        LogLog.warn("Interrupted waiting for shutdown", e);
+                    }
+                }
+            } catch (SQLException e) {
+                errorHandler.error("Unable to close HSQL database", e, 1);
+            }
+        }
+    }
+
     /**
      * Start the database and create the table if it doesn't exist
      */
-    private void createTableAndIndex(String dirName, String logName)
-            throws SQLException {
+    private void createTableAndIndex(String dirName, String logName) throws SQLException {
 
         try {
             Class.forName("org.hsqldb.jdbcDriver");
         } catch (ClassNotFoundException e) {
             LogLog.error("Cannot start HSQL database", e);
         }
-        String hsqlConfigUrl = "jdbc:hsqldb:file:" + dirName + "/" + logName
-                + ";hsqldb.applog=1; hsqldb.lock_file=false";
 
         synchronized (initializeLock) {
+            LogLog.warn("Initializing database");
             conn = DriverManager.getConnection(hsqlConfigUrl, "sa", "");
             initializeLock.notify();
         }
 
-        insertStatement = "INSERT INTO " + logName
-                + " (time, message) VALUES(?, ?)";
-
-        selectStatement = "SELECT TOP ? id, message, time FROM " + logName
-                + " ORDER BY id";
-
+        insertStatement = "INSERT INTO " + logName + " (time, message) VALUES(?, ?)";
+        selectStatement = "SELECT TOP ? id, message, time FROM " + logName + " ORDER BY id";
         deleteStatement = "DELETE FROM " + logName + " WHERE id in (";
 
         // The table may already exist if the queue is persistent.
@@ -187,8 +221,7 @@ public class EmbeddedDb {
 
         Statement st = conn.createStatement();
 
-        st.execute("CREATE CACHED TABLE "
-                + logName
+        st.execute("CREATE CACHED TABLE " + logName
                 + "(id BIGINT IDENTITY PRIMARY KEY, message LONGVARCHAR, time BIGINT)");
         st.execute("CREATE INDEX id_index ON " + logName + "(id)");
         st.execute("CREATE INDEX time_index ON " + logName + "(time)");
