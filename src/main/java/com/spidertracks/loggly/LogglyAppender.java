@@ -111,71 +111,106 @@ public class LogglyAppender extends AppenderSkeleton {
 
         public void run() {
 
+            
             curState = ThreadState.RUNNING;
             
-            // ThreadState.LAST_SWEEP lets us have one last pass after shutdown, to see if there is anything left to send.
-            while (curState == ThreadState.RUNNING || curState == ThreadState.STOP_REQUESTED) {
-                List<Entry> messages = db.getNext(batchSize);
-
-                if (messages == null || messages.size() == 0) {
+            boolean initialized = waitUntilDbInitialized();
+            if (initialized) {
+                
+                // ThreadState.LAST_SWEEP lets us have one last pass after shutdown, to see if there is anything left to send.
+                while (curState == ThreadState.RUNNING || curState == ThreadState.STOP_REQUESTED) {
                     
-                    // We aren't synchronized around the database, because that doesn't matter
-                    // this synchronization block just lets us be notified sooner if a new message comes it
-                    synchronized (waitLock) {
-                        try {
-                            // nothing to consume, sleep for 1 second
-                            waitLock.wait(1000);
-                        } catch (InterruptedException e) {
-                            if (curState == ThreadState.STOP_REQUESTED) {
-                                // no-op, we are shutting down
-                            } else {
-                                // an error
-                                errorHandler.error("Unable to sleep for 1 second in queue consumer", e, 1);
+                    if (curState == ThreadState.STOP_REQUESTED) {
+                        LogLog.warn("Loggly doing one last sweep");
+                    }
+                    
+                    List<Entry> messages = db.getNext(batchSize);
+                    
+                    if (messages == null || messages.size() == 0) {
+                        
+                        // We aren't synchronized around the database, because that doesn't matter
+                        // this synchronization block just lets us be notified sooner if a new message comes it
+                        synchronized (waitLock) {
+                            try {
+                                // nothing to consume, sleep for 1 second
+                                waitLock.wait(1000);
+                            } catch (InterruptedException e) {
+                                if (curState == ThreadState.STOP_REQUESTED) {
+                                    // no-op, we are shutting down
+                                } else {
+                                    // an error
+                                    errorHandler.error("Unable to sleep for 1 second in queue consumer", e, 1);
+                                }
                             }
                         }
+                        
+                    } else {
+                        
+                        try {
+                            int response = sendData(messages);
+                            switch (response) {
+                            case 200:
+                            case 201: {
+                                db.deleteEntries(messages);
+                                break;
+                            }
+                            case 400: {
+                                LogLog.warn("loggly bad request dumping message");
+                                db.deleteEntries(messages);
+                            }
+                            default: {
+                                LogLog.error("Received error code " + response + " from Loggly servers.");
+                            }
+                            }
+                        } catch (IOException e) {
+                            errorHandler.error(String.format("Unable to send data to loggly at URL %s", logglyUrl), e, 2);
+                        }
                     }
-
-                } else {
-
-                    try {
-                        int response = sendData(messages);
-                        switch (response) {
-                        case 200:
-                        case 201: {
-                            db.deleteEntries(messages);
-                            break;
-                        }
-                        case 400: {
-                            LogLog.warn("loggly bad request dumping message");
-                            db.deleteEntries(messages);
-                        }
-                        default: {
-                            LogLog.error("Received error code " + response + " from Loggly servers.");
-                        }
-                        }
-                    } catch (IOException e) {
-                        errorHandler.error(String.format("Unable to send data to loggly at URL %s", logglyUrl), e, 2);
-                    }
+                    
+                    // The order of these two if statements (and the else) is very important
+                    // If the order was reversed, we would drop straight from RUNNING to STOPPED without one last 'cleanup' pass.
+                    // If the else was missing, we would permently be stuck in the STOP_REQUESTED state.
+                    if (curState == ThreadState.STOP_REQUESTED) {
+                        curState = ThreadState.STOPPED;
+                    } else if (requestedState == ThreadState.STOPPED) {
+                        curState = ThreadState.STOP_REQUESTED;
+                    } 
+                    
                 }
                 
-                // The order of these two if statements (and the else) is very important
-                // If the order was reversed, we would drop straight from RUNNING to STOPPED without one last 'cleanup' pass.
-                // If the else was missing, we would permently be stuck in the STOP_REQUESTED state.
-                if (curState == ThreadState.STOP_REQUESTED) {
-                    curState = ThreadState.STOPPED;
-                } else if (requestedState == ThreadState.STOPPED) {
-                    curState = ThreadState.STOP_REQUESTED;
-                } 
-                
+                db.shutdown();
+                LogLog.warn("Loggly background thread is stopped.");
+            } else {
+                LogLog.warn("Loggly bailing out because we were interrupted while waiting to initialize");
+                curState = ThreadState.STOPPED;
             }
-            
-            db.shutdown();
-            
-            LogLog.warn("Loggly background thread is stopped.");
+
             synchronized (stopLock) {
                 stopLock.notify();
             }
         }
+        
+        /** Waits until the db is initialized, or stop has been requested.
+         * 
+         * @return
+         */
+        public boolean waitUntilDbInitialized() {
+            Object dbInitLock = db.getInitLock();
+            synchronized (dbInitLock) {
+                while (db.isInitialized() && requestedState != ThreadState.STOPPED) {
+                    try {
+                        dbInitLock.wait();
+                    } catch (InterruptedException e) {
+                        LogLog.error("Loggly Appender interrupted waiting for db initalization", e);
+                    }
+                }
+            }
+            
+            // if this returns false, we should abort, because it means we were interrupted
+            // after shutdown was requested.
+            return db.isInitialized();
+        }
+
 
         /**
          * Send the data via http post

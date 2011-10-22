@@ -7,6 +7,7 @@ import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.log4j.helpers.LogLog;
 import org.apache.log4j.spi.ErrorHandler;
 
 /**
@@ -22,6 +23,7 @@ public class EmbeddedDb {
     private String insertStatement = null;
     private String selectStatement = null;
     private String deleteStatement = null;
+    private Object initializeLock = new Object();
 
 
     /**
@@ -143,6 +145,14 @@ public class EmbeddedDb {
         return 0;
     }
 
+    public boolean isInitialized() {
+        return conn != null;
+    }
+
+    public Object getInitLock() {
+        return initializeLock;
+    }
+    
     /**
      * Start the database and create the table if it doesn't exist
      */
@@ -152,12 +162,15 @@ public class EmbeddedDb {
         try {
             Class.forName("org.hsqldb.jdbcDriver");
         } catch (ClassNotFoundException e) {
-            e.printStackTrace();
+            LogLog.error("Cannot start HSQL database", e);
         }
         String hsqlConfigUrl = "jdbc:hsqldb:file:" + dirName + "/" + logName
                 + ";hsqldb.applog=1; hsqldb.lock_file=false";
 
-        conn = DriverManager.getConnection(hsqlConfigUrl, "sa", "");
+        synchronized (initializeLock) {
+            conn = DriverManager.getConnection(hsqlConfigUrl, "sa", "");
+            initializeLock.notify();
+        }
 
         insertStatement = "INSERT INTO " + logName
                 + " (time, message) VALUES(?, ?)";
