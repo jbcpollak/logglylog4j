@@ -12,10 +12,9 @@ import java.net.*;
 import java.util.List;
 
 /**
- * Currently uses an asynchronous blocking queue to write messages. Messages are
- * written to files with sequential identifiers, these sequential files are then
- * read by the reader thread. When a file is fully consumed, it is removed.
- *
+ * Currently uses an asynchronous blocking queue to write messages. Messages are written to files with sequential identifiers, these sequential files are then read by the reader thread. When a file is
+ * fully consumed, it is removed.
+ * 
  * @author Todd Nine
  */
 public class LogglyAppender extends AppenderSkeleton {
@@ -24,7 +23,7 @@ public class LogglyAppender extends AppenderSkeleton {
 
     private EmbeddedDb db;
 
-//	private LogglyMessageQueue messageQ;
+    // private LogglyMessageQueue messageQ;
 
     private String dirName;
 
@@ -32,10 +31,11 @@ public class LogglyAppender extends AppenderSkeleton {
 
     private int batchSize = 50;
 
-
     private String proxyHost = null;
 
     private int proxyPort = -1;
+
+    private Object waitLock = new Object();
 
     public LogglyAppender() {
         super();
@@ -46,8 +46,8 @@ public class LogglyAppender extends AppenderSkeleton {
     }
 
     public void close() {
+        // Stop is a blocking call, it waits for HttpPost to finish.
         poster.stop();
-
     }
 
     public boolean requiresLayout() {
@@ -58,18 +58,21 @@ public class LogglyAppender extends AppenderSkeleton {
     protected void append(LoggingEvent event) {
 
         /**
-         * We always only produce to the current file. So there's no need for
-         * locking
+         * We always only produce to the current file. So there's no need for locking
          */
+
+        assert this.layout != null : "Cannot log, there is no layout configured.";
 
         String output = this.layout.format(event);
 
-        db.writeEntry(output, System.nanoTime());
+        synchronized (waitLock) {
+            db.writeEntry(output, System.nanoTime());
+            waitLock.notify();
+        }
     }
 
     /**
-     * Reads the output file directory and puts all existing files into the
-     * queue.
+     * Reads the output file directory and puts all existing files into the queue.
      */
     @Override
     public void activateOptions() {
@@ -79,62 +82,104 @@ public class LogglyAppender extends AppenderSkeleton {
         }
 
         if (logglyUrl == null) {
-            LogLog.warn("loggy url for log queue was not set.  Please set the \"logglyUrl\" property");
+            LogLog.warn("loggly url for log queue was not set.  Please set the \"logglyUrl\" property");
         }
 
+        if (name == null) {
+            // set a reasonable default
+            name = "loggly";
+        }
+
+        LogLog.debug("Creating database in " + dirName + " with name " + getName());
         db = new EmbeddedDb(dirName, getName(), errorHandler);
 
-//		messageQ = new LogglyMessageQueue(dirName, getName(), errorHandler);
         Thread posterThread = new Thread(poster);
-        posterThread.setDaemon(true);
         posterThread.start();
 
     }
 
+    private enum ThreadState { START, RUNNING, STOP_REQUESTED, STOPPED };
+
     private class HttpPost implements Runnable {
 
-        boolean running = true;
+        
+        // State variables needs to be volatile, otherwise it can be cached local to the thread and stop() will never work
+        volatile ThreadState curState = ThreadState.START;
+        volatile ThreadState requestedState = ThreadState.STOPPED;
+        
+        final Object stopLock = new Object();
 
         public void run() {
 
-            while (running) {
+            curState = ThreadState.RUNNING;
+            
+            // ThreadState.LAST_SWEEP lets us have one last pass after shutdown, to see if there is anything left to send.
+            while (curState == ThreadState.RUNNING || curState == ThreadState.STOP_REQUESTED) {
                 List<Entry> messages = db.getNext(batchSize);
 
                 if (messages == null || messages.size() == 0) {
-                    // nothing to consume,sleep for 1 second
-                    try {
-                        Thread.sleep(1000);
-                    } catch (InterruptedException e) {
-                        // swallow
-                        errorHandler
-                                .error("Unable to sleep for 1 second in queue consumer",
-                                        e, 1);
+                    
+                    // We aren't synchronized around the database, because that doesn't matter
+                    // this synchronization block just lets us be notified sooner if a new message comes it
+                    synchronized (waitLock) {
+                        try {
+                            // nothing to consume, sleep for 1 second
+                            waitLock.wait(1000);
+                        } catch (InterruptedException e) {
+                            if (curState == ThreadState.STOP_REQUESTED) {
+                                // no-op, we are shutting down
+                            } else {
+                                // an error
+                                errorHandler.error("Unable to sleep for 1 second in queue consumer", e, 1);
+                            }
+                        }
                     }
-                    continue;
-                }
 
-                try {
-                    int response = sendData(messages);
-                    switch (response) {
+                } else {
+
+                    try {
+                        int response = sendData(messages);
+                        switch (response) {
+                        case 200:
                         case 201: {
                             db.deleteEntries(messages);
+                            break;
                         }
                         case 400: {
                             LogLog.warn("loggly bad request dumping message");
                             db.deleteEntries(messages);
                         }
+                        default: {
+                            LogLog.error("Received error code " + response + " from Loggly servers.");
+                        }
+                        }
+                    } catch (IOException e) {
+                        errorHandler.error(String.format("Unable to send data to loggly at URL %s", logglyUrl), e, 2);
                     }
-                } catch (IOException e) {
-                    errorHandler.error(String.format(
-                            "Unable to send data to loggly at URL %s",
-                            logglyUrl), e, 2);
                 }
+                
+                // The order of these two if statements (and the else) is very important
+                // If the order was reversed, we would drop straight from RUNNING to STOPPED without one last 'cleanup' pass.
+                // If the else was missing, we would permently be stuck in the STOP_REQUESTED state.
+                if (curState == ThreadState.STOP_REQUESTED) {
+                    curState = ThreadState.STOPPED;
+                } else if (requestedState == ThreadState.STOPPED) {
+                    curState = ThreadState.STOP_REQUESTED;
+                } 
+                
+            }
+            
+            db.shutdown();
+            
+            LogLog.warn("Loggly background thread is stopped.");
+            synchronized (stopLock) {
+                stopLock.notify();
             }
         }
 
         /**
          * Send the data via http post
-         *
+         * 
          * @param message
          * @throws IOException
          */
@@ -151,10 +196,9 @@ public class LogglyAppender extends AppenderSkeleton {
             conn.setDoOutput(true);
             conn.setDoInput(true);
             conn.setUseCaches(false);
-            conn.setRequestProperty("Content-Type",
-                    "application/x-www-form-urlencoded");
-            OutputStreamWriter wr = new OutputStreamWriter(
-                    conn.getOutputStream());
+            // conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+            conn.setRequestProperty("Content-Type", "text/plain");
+            OutputStreamWriter wr = new OutputStreamWriter(conn.getOutputStream());
 
             for (Entry message : messages) {
                 if (message.getMessage().getBytes().length < 5200)
@@ -167,12 +211,11 @@ public class LogglyAppender extends AppenderSkeleton {
             wr.close();
             HttpURLConnection huc = ((HttpURLConnection) conn);
             int respCode = huc.getResponseCode();
-            // graped from http://download.oracle.com/javase/1.5.0/docs/guide/net/http-keepalive.html
+            // grabbed from http://download.oracle.com/javase/1.5.0/docs/guide/net/http-keepalive.html
             BufferedReader in = null;
             StringBuffer response = null;
             try {
-                in = new BufferedReader(new InputStreamReader(
-                        conn.getInputStream()));
+                in = new BufferedReader(new InputStreamReader(conn.getInputStream()));
                 response = new StringBuffer();
                 int value = -1;
                 while ((value = in.read()) != -1) {
@@ -189,13 +232,10 @@ public class LogglyAppender extends AppenderSkeleton {
                         response.append((char) value);
                     }
                     in.close();
-                    errorHandler.error(String.format(
-                            "Unable to send data to loggly at URL %s Response %s",
-                            logglyUrl, response));
+                    errorHandler.error(String.format("Unable to send data to loggly at URL %s Response %s", logglyUrl,
+                            response));
                 } catch (IOException ee) {
-                    errorHandler.error(String.format(
-                            "Unable to send data to loggly at URL %s",
-                            logglyUrl), e, 2);
+                    errorHandler.error(String.format("Unable to send data to loggly at URL %s", logglyUrl), e, 2);
 
                 }
             }
@@ -207,14 +247,31 @@ public class LogglyAppender extends AppenderSkeleton {
          */
 
         public void stop() {
-            running = false;
+            requestedState = ThreadState.STOPPED;
+            
+            // Poke the thread to shut it down.
+            synchronized (waitLock) {
+                LogLog.debug("Waking loggly thread up");
+                waitLock.notify();
+            }
+            
+            synchronized (poster.stopLock) {
+                LogLog.debug("Waiting for loggly thread to stop");
+                while (poster.curState != ThreadState.STOPPED) {
+                    try {
+                        poster.stopLock.wait(100);
+                    } catch (InterruptedException e) {
+                        LogLog.error("Interrupted while waiting for Http thread to stop, bailing out.");
+                    }
+                }
+            }
         }
 
     }
 
     /**
      * ProxyHost a valid dns name or ip adresse for a proxy.
-     *
+     * 
      * @param proxyHost
      */
     public void setProxyHost(String proxyHost) {
@@ -223,7 +280,7 @@ public class LogglyAppender extends AppenderSkeleton {
 
     /**
      * The proxy port for a proxy
-     *
+     * 
      * @param proxyPort
      */
     public void setProxyPort(int proxyPort) {
@@ -231,22 +288,24 @@ public class LogglyAppender extends AppenderSkeleton {
     }
 
     /**
-     * @param dirName the dirName to set
+     * @param dirName
+     *            the dirName to set
      */
     public void setDirName(String dirName) {
         this.dirName = dirName;
     }
 
     /**
-     * @param logglyUrl the logglyUrl to set
+     * @param logglyUrl
+     *            the logglyUrl to set
      */
     public void setLogglyUrl(String logglyUrl) {
         this.logglyUrl = logglyUrl;
     }
 
     /**
-     * Set the maximum batch size for uploads.  Defaults to 50.
-     *
+     * Set the maximum batch size for uploads. Defaults to 50.
+     * 
      * @param batchSize
      */
     public void setBatchSize(int batchSize) {

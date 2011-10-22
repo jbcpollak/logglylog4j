@@ -3,11 +3,11 @@
  */
 package com.spidertracks.loggly;
 
-import org.apache.log4j.spi.ErrorHandler;
-
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
+
+import org.apache.log4j.spi.ErrorHandler;
 
 /**
  * Class that performs all operations on the embedded log database
@@ -39,6 +39,16 @@ public class EmbeddedDb {
         } catch (SQLException e) {
             errorHandler.error("Unable to create local database for log queue",
                     e, 1);
+        }
+    }
+    
+    public void shutdown() {
+        try {
+            PreparedStatement ps = conn.prepareStatement("SHUTDOWN COMPACT");
+            ps.execute();
+            ps.close();
+        } catch (SQLException e) {
+            errorHandler.error("Unable to close HSQL database", e, 1);
         }
     }
 
@@ -138,7 +148,8 @@ public class EmbeddedDb {
      */
     private void createTableAndIndex(String dirName, String logName)
             throws SQLException {
-                                            try {
+
+        try {
             Class.forName("org.hsqldb.jdbcDriver");
         } catch (ClassNotFoundException e) {
             e.printStackTrace();
@@ -156,7 +167,7 @@ public class EmbeddedDb {
 
         deleteStatement = "DELETE FROM " + logName + " WHERE id in (";
 
-        // The table may allready exsists if the queue is persistent.
+        // The table may already exist if the queue is persistent.
         if (tableExists(logName)) {
             return;
         }
