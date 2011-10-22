@@ -27,7 +27,7 @@ or
     log4j.appender.loggly.proxyHost=example.com
     log4j.appender.loggly.proxyPort=8080
     log4j.appender.loggly.batchSize=50
-    log4j.appender.loggly.layout=org.apache.log4j.EnchancedPatternLayout
+    log4j.appender.loggly.layout=org.apache.log4j.EnhancedPatternLayout
     log4j.appender.loggly.layout.ConversionPattern=%d{ISO8601}{GMT}Z %5p [%t]  %m%n
 
 
