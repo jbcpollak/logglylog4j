@@ -19,7 +19,7 @@ public class LogglyAppenderManualTest {
             System.out.println("You must specify your loggly api key to test this code");
             System.exit(-1);
         }
-        TestConfigHelper.configureLoggingToConsole(apiKey);
+        TestConfigHelper.setupLogging(apiKey);
         
         Logger logger = Logger.getLogger(TestConfigHelper.LOGGER_NAME);
         
