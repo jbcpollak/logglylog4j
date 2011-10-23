@@ -3,15 +3,16 @@
  */
 package com.spidertracks.loggly;
 
-import org.apache.log4j.LogManager;
+import java.util.Random;
+
+import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
 
 /**
  * @author jpollak
  *
  */
-public class LogglyAppenderManualTest {
-
+public class LogglyRandomGenerator {
     
     public static void main(String[] args) throws InterruptedException {
         final String apiKey = args[0];
@@ -23,16 +24,20 @@ public class LogglyAppenderManualTest {
         
         Logger logger = Logger.getLogger(TestConfigHelper.LOGGER_NAME);
         
-        long time = System.currentTimeMillis();
-        String execId = " Execution Id: " + time;
+        Level[] levels = new Level[]{Level.TRACE, Level.DEBUG, Level.INFO, Level.WARN, Level.ERROR};
         
-        logger.trace("This is a trace line." + execId);
-        logger.debug("This is a debug line." + execId);
-        logger.warn("This is a warning message." + execId);
-        logger.fatal("This is a fatal error!" + execId);
+        long id = 0;
+        Random rand = new Random();
+        while(true) {
+            id++;
+            int level = rand.nextInt(levels.length);
+            logger.log(levels[level], "Id=" + id + " The time is now " + System.currentTimeMillis());
+            
+            // sleep a random amount up to 30 seconds
+            Thread.sleep((long) (30 * 1000 * rand.nextFloat()));
+        }
         
         // Gracefully shutdown. This lets the appender shutdown its thread cleanly.
-        LogManager.shutdown();
+//        LogManager.shutdown();
     }
-
 }
